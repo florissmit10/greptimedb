@@ -15,19 +15,23 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use common_meta::DatanodeId;
 use common_meta::key::TableMetadataManagerRef;
 use common_procedure::{ProcedureContext, ProcedureId, ProcedureManagerRef, ProcedureWithId};
 use common_telemetry::info;
+use common_time::util::current_time_millis;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
+use crate::metasrv::SelectorContext;
 use crate::node_scheduling::NodeSchedulingManagerRef;
 use crate::procedure::drain_datanode::{
-    Context as DrainDatanodeContext, DrainDatanodeProcedure, DrainDatanodeProcedureTask,
-    PersistentContext,
+    Context as DrainDatanodeContext, DEFAULT_DRAIN_TIMEOUT, DrainDatanodeProcedure,
+    DrainDatanodeProcedureTask, MAX_PARALLELISM, PersistentContext,
 };
+use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
 
 pub type DrainDatanodeManagerRef = Arc<DrainDatanodeManager>;
 
@@ -78,13 +82,16 @@ impl Drop for DrainDatanodeProcedureGuard {
 
 /// Manages the [`DrainDatanodeProcedure`]s.
 ///
-/// It registers the procedure loader and submits drain tasks. A datanode is drained by at
-/// most one procedure at a time: [`DrainDatanodeManager::submit_procedure`] rejects a second
-/// drain through the [`DrainDatanodeProcedureTracker`].
+/// It registers the procedure loader and submits drain tasks. Procedures of the same
+/// datanode are serialized by the procedure lock declared in
+/// [`DrainDatanodeProcedure::lock_key`].
 pub struct DrainDatanodeManager {
     procedure_manager: ProcedureManagerRef,
     table_metadata_manager: TableMetadataManagerRef,
     node_scheduling_manager: NodeSchedulingManagerRef,
+    region_migration_manager: RegionMigrationManagerRef,
+    selector_ctx: SelectorContext,
+    migration_timeout: Duration,
     tracker: DrainDatanodeProcedureTracker,
 }
 
@@ -94,11 +101,17 @@ impl DrainDatanodeManager {
         procedure_manager: ProcedureManagerRef,
         table_metadata_manager: TableMetadataManagerRef,
         node_scheduling_manager: NodeSchedulingManagerRef,
+        region_migration_manager: RegionMigrationManagerRef,
+        selector_ctx: SelectorContext,
+        migration_timeout: Duration,
     ) -> Self {
         Self {
             procedure_manager,
             table_metadata_manager,
             node_scheduling_manager,
+            region_migration_manager,
+            selector_ctx,
+            migration_timeout,
             tracker: DrainDatanodeProcedureTracker::default(),
         }
     }
@@ -114,6 +127,9 @@ impl DrainDatanodeManager {
         DrainDatanodeContext::new(
             self.table_metadata_manager.clone(),
             self.node_scheduling_manager.clone(),
+            self.region_migration_manager.clone(),
+            self.selector_ctx.clone(),
+            self.migration_timeout,
             persistent_ctx,
         )
     }
@@ -130,6 +146,19 @@ impl DrainDatanodeManager {
             }
             .fail();
         }
+        if task.parallelism == 0 || task.parallelism > MAX_PARALLELISM {
+            return error::InvalidArgumentsSnafu {
+                err_msg: format!("the parallelism must be in 1..={}", MAX_PARALLELISM),
+            }
+            .fail();
+        }
+        let timeout = task.timeout.unwrap_or(DEFAULT_DRAIN_TIMEOUT);
+        if timeout.is_zero() {
+            return error::InvalidArgumentsSnafu {
+                err_msg: "the timeout must be greater than zero",
+            }
+            .fail();
+        }
 
         let Some(guard) = self.tracker.insert_running_procedure(&task) else {
             return error::DrainDatanodeRunningSnafu {
@@ -141,14 +170,19 @@ impl DrainDatanodeManager {
         let persistent_ctx = PersistentContext {
             node_id: task.node_id,
             target_node_id: task.target_node_id,
+            parallelism: task.parallelism,
+            strategy: task.strategy,
+            // The budget starts when the task is submitted, so neither a slow start nor a
+            // restart extends it.
+            deadline_ms: current_time_millis() + timeout.as_millis() as i64,
         };
         let procedure = DrainDatanodeProcedure::new(self.context(persistent_ctx), vec![guard]);
         let procedure_with_id =
             ProcedureWithId::with_random_id(Box::new(procedure)).with_context(procedure_context);
         let procedure_id = procedure_with_id.id;
         info!(
-            "Starting drain datanode procedure {procedure_id} for datanode {}",
-            task.node_id
+            "Starting drain datanode procedure {procedure_id} for datanode {}, timeout: {:?}",
+            task.node_id, timeout
         );
         self.procedure_manager
             .submit(procedure_with_id)
@@ -162,6 +196,9 @@ impl DrainDatanodeManager {
     pub(crate) fn try_start(&self) -> Result<()> {
         let table_metadata_manager = self.table_metadata_manager.clone();
         let node_scheduling_manager = self.node_scheduling_manager.clone();
+        let region_migration_manager = self.region_migration_manager.clone();
+        let selector_ctx = self.selector_ctx.clone();
+        let migration_timeout = self.migration_timeout;
         let tracker = self.tracker.clone();
         self.procedure_manager
             .register_loader(
@@ -169,10 +206,15 @@ impl DrainDatanodeManager {
                 Box::new(move |json| {
                     let table_metadata_manager = table_metadata_manager.clone();
                     let node_scheduling_manager = node_scheduling_manager.clone();
+                    let region_migration_manager = region_migration_manager.clone();
+                    let selector_ctx = selector_ctx.clone();
                     let factory = move |persistent_ctx| {
                         DrainDatanodeContext::new(
                             table_metadata_manager,
                             node_scheduling_manager,
+                            region_migration_manager,
+                            selector_ctx,
+                            migration_timeout,
                             persistent_ctx,
                         )
                     };

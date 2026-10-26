@@ -15,12 +15,17 @@
 use std::any::Any;
 
 use common_procedure::{Context as ProcedureContext, Status};
+use common_telemetry::{error, info};
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
+use crate::error::{self, Result};
 use crate::procedure::drain_datanode::{Context, State};
 
-/// Finishes the procedure.
+/// Finishes the procedure and reports the outcome.
+///
+/// The procedure state carries no output: only its status is observable through the
+/// procedure API, so a drain that left regions behind ends as `Failed` with the failed
+/// regions in the error instead of as `Done` with a report.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct DrainDatanodeEnd;
 
@@ -29,9 +34,33 @@ pub(crate) struct DrainDatanodeEnd;
 impl State for DrainDatanodeEnd {
     async fn next(
         &mut self,
-        _ctx: &mut Context,
+        ctx: &mut Context,
         _procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
+        let node_id = ctx.persistent_ctx.node_id;
+        let migrated = ctx.volatile_ctx.migrated;
+        let follower_regions = ctx.volatile_ctx.follower_regions().len();
+        let failed_regions = ctx.volatile_ctx.failed_regions.clone();
+
+        if !failed_regions.is_empty() {
+            error!(
+                "Drained datanode {} except {} regions, failed regions: {:?}",
+                node_id,
+                failed_regions.len(),
+                failed_regions
+            );
+            return error::DrainDatanodeAbortSnafu {
+                node_id,
+                failed_regions,
+            }
+            .fail();
+        }
+
+        info!(
+            "Drained datanode {}, migrated leader regions: {}, follower regions left: {}",
+            node_id, migrated, follower_regions
+        );
+
         Ok((Box::new(DrainDatanodeEnd), Status::done()))
     }
 

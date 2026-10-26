@@ -91,13 +91,6 @@ pub enum Error {
         region_id: RegionId,
     },
 
-    #[snafu(display("Another drain procedure is running for datanode: {}", node_id))]
-    DrainDatanodeRunning {
-        #[snafu(implicit)]
-        location: Location,
-        node_id: DatanodeId,
-    },
-
     #[snafu(display(
         "The region migration procedure is completed for region: {}, target_peer: {}",
         region_id,
@@ -115,6 +108,49 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         reason: String,
+    },
+
+    #[snafu(display("Another drain procedure is running for datanode: {}", node_id))]
+    DrainDatanodeRunning {
+        node_id: DatanodeId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Drain datanode {} aborted, failed regions: {:?}",
+        node_id,
+        failed_regions
+    ))]
+    DrainDatanodeAbort {
+        node_id: DatanodeId,
+        failed_regions: Vec<RegionId>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Drain datanode {} exceeded the maximum rescan rounds: {}",
+        node_id,
+        max_rounds
+    ))]
+    DrainDatanodeRescanExceeded {
+        node_id: DatanodeId,
+        max_rounds: u32,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to get the state receiver for drain datanode subprocedure {}",
+        procedure_id
+    ))]
+    DrainDatanodeSubprocedureStateReceiver {
+        procedure_id: ProcedureId,
+        #[snafu(source)]
+        source: common_procedure::Error,
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display(
@@ -1261,8 +1297,10 @@ impl ErrorExt for Error {
             | Error::RegionRouteNotFound { .. }
             | Error::MigrationAbort { .. }
             | Error::MigrationRunning { .. }
+            | Error::RegionMigrated { .. }
             | Error::DrainDatanodeRunning { .. }
-            | Error::RegionMigrated { .. } => StatusCode::Unexpected,
+            | Error::DrainDatanodeAbort { .. }
+            | Error::DrainDatanodeRescanExceeded { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::SaveClusterInfo { source, .. }
             | Error::InvalidClusterInfoFormat { source, .. }
@@ -1313,6 +1351,7 @@ impl ErrorExt for Error {
             Error::RepartitionGcRequirement { source, .. } => source.status_code(),
             Error::InspectRepartitionProcedures { source, .. } => source.status_code(),
             Error::RepartitionSubprocedureStateReceiver { source, .. } => source.status_code(),
+            Error::DrainDatanodeSubprocedureStateReceiver { source, .. } => source.status_code(),
             Error::AllocateRegions { source, .. } => source.status_code(),
             Error::DeallocateRegions { source, .. } => source.status_code(),
             Error::AllocateRegionRoutes { source, .. } => source.status_code(),
@@ -1418,7 +1457,8 @@ impl ErrorExt for Error {
             | Error::StopProcedureManager { source, .. }
             | Error::RegisterProcedureLoader { source, .. }
             | Error::InspectRepartitionProcedures { source, .. }
-            | Error::RepartitionSubprocedureStateReceiver { source, .. } => source.retry_hint(),
+            | Error::RepartitionSubprocedureStateReceiver { source, .. }
+            | Error::DrainDatanodeSubprocedureStateReceiver { source, .. } => source.retry_hint(),
 
             Error::ShutdownServer { source, .. } | Error::StartHttp { source, .. } => {
                 source.retry_hint()

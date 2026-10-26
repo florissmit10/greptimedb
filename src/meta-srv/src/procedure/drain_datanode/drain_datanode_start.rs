@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::key::NodeSchedulingRole;
-use crate::procedure::drain_datanode::drain_datanode_end::DrainDatanodeEnd;
+use crate::procedure::drain_datanode::dispatch::Dispatch;
 use crate::procedure::drain_datanode::{Context, State};
 
 /// Fences the datanode and builds the drain plan.
@@ -44,7 +44,7 @@ impl State for DrainDatanodeStart {
             info!("Marked datanode {} as unschedulable", node_id);
         }
 
-        ctx.ensure_plan().await?;
+        ctx.rebuild_plan().await?;
         info!(
             "Planned drain of datanode {}, leader regions: {}, follower regions: {}",
             node_id,
@@ -52,7 +52,11 @@ impl State for DrainDatanodeStart {
             ctx.volatile_ctx.follower_regions().len()
         );
 
-        Ok((Box::new(DrainDatanodeEnd), Status::executing(true)))
+        // The only persisted status of the procedure: persisting it registers the procedure,
+        // so that a metasrv restart resumes it. The plan and the progress of a run stay in
+        // the volatile context, and a resumed procedure rebuilds the plan by rescanning the
+        // datanode.
+        Ok((Box::new(Dispatch), Status::executing(true)))
     }
 
     fn as_any(&self) -> &dyn Any {
