@@ -1,0 +1,43 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="The COPY FROM STDIN codec framework."><title>servers::postgres::copy_in::codec - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="servers" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module codec</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../servers/index.html">servers</a><span class="version">1.4.0-alpha.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module codec</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#parsing-and-conversion" title="Parsing and conversion">Parsing and conversion</a></li><li><a href="#options" title="Options">Options</a></li></ul><h3><a href="#traits">Module Items</a></h3><ul class="block"><li><a href="#traits" title="Traits">Traits</a></li><li><a href="#types" title="Type Aliases">Type Aliases</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In servers::<wbr>postgres::<wbr>copy_<wbr>in</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../index.html">servers</a>::<wbr><a href="../../index.html">postgres</a>::<wbr><a href="../index.html">copy_in</a></div><h1>Module <span>codec</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../src/servers/postgres/copy_in/codec.rs.html#15-116">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>The COPY FROM STDIN codec framework.</p>
+<p>A <em>codec</em> binds one COPY data format to its implementation. Codecs are
+stateless strategies: they validate the options they accept at
+statement-parse time, describe which column types they can ingest, and
+create the stateful <a href="trait.RecordParser.html" title="trait servers::postgres::copy_in::codec::RecordParser"><code>RecordParser</code></a> per stream.</p>
+<p>Formats are not limited to PostgreSQL’s own — GreptimeDB-specific
+formats (a line protocol, a JSON-lines dialect, …) register exactly
+like <code>csv</code> does, and may define their own options through the open
+<code>WITH (...)</code> clause.</p>
+<h2 id="parsing-and-conversion"><a class="doc-anchor" href="#parsing-and-conversion">§</a>Parsing and conversion</h2>
+<p>A <a href="trait.RecordParser.html" title="trait servers::postgres::copy_in::codec::RecordParser"><code>RecordParser</code></a> consumes raw <code>CopyData</code> bytes and emits complete,
+insertable rows: one <a href="type.ParsedRow.html" title="type servers::postgres::copy_in::codec::ParsedRow"><code>ParsedRow</code></a> per record, in the order of the
+targeted columns. Parsers validate record shape (field counts) and
+convert field values themselves — <code>csv</code> delegates both splitting and
+typed conversion to arrow-csv’s incremental decoder (the engine
+behind <code>COPY ... FROM 'file.csv'</code>) and turns decoded batches into
+rows with the shared <code>api::helper::vectors_to_rows</code>. A future format
+that carries values as text (e.g. a line protocol) would reintroduce
+shared field-conversion helpers here; see the removed <code>text</code> codec in
+git history for the shape they had.</p>
+<h2 id="options"><a class="doc-anchor" href="#options">§</a>Options</h2>
+<p>The <code>WITH (...)</code> clause is open: every <code>KEY value</code> entry the client
+writes is collected into a [<code>CopyOptionSet</code>] (see <code>options</code>) regardless
+of whether any format understands it — the statement is parsed
+textually (see <code>parse</code>) precisely so options beyond sqlparser’s COPY
+grammar can reach the codecs. A codec builder takes the options it
+understands (<code>take_string</code>, <code>take_single_byte</code>, <code>take_flag</code>, or raw
+<code>take_value</code> for codec-specific shapes) and rejects the rest with
+<code>reject_leftovers</code>, so a future format like
+<code>COPY t FROM STDIN WITH (FORMAT influxdb_line, precision 'ns')</code> only
+needs its own codec and registry entry.</p>
+<p>To add a format:</p>
+<ol>
+<li>implement <a href="trait.CopyInCodec.html" title="trait servers::postgres::copy_in::codec::CopyInCodec"><code>CopyInCodec</code></a> for a config struct holding the format’s
+validated options (see <code>csv::CsvCodec</code> for the example),</li>
+<li>write a builder <code>fn(CopyOptionSet) -&gt; PgWireResult&lt;Arc&lt;dyn CopyInCodec&gt;&gt;</code> that applies defaults and rejects options the format
+does not accept,</li>
+<li>register the builder under every accepted <code>FORMAT</code> name (including
+aliases) in <code>REGISTERED_FORMATS</code> in the parent module.</li>
+</ol>
+</div></details><h2 id="traits" class="section-header">Traits<a href="#traits" class="anchor">§</a></h2><dl class="item-table"><dt><a class="trait" href="trait.CopyInCodec.html" title="trait servers::postgres::copy_in::codec::CopyInCodec">Copy<wbr>InCodec</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>A COPY FROM STDIN data format implementation.</dd><dt><a class="trait" href="trait.RecordParser.html" title="trait servers::postgres::copy_in::codec::RecordParser">Record<wbr>Parser</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Incremental parser of one COPY FROM STDIN stream.</dd></dl><h2 id="types" class="section-header">Type Aliases<a href="#types" class="anchor">§</a></h2><dl class="item-table"><dt><a class="type" href="type.ParsedRow.html" title="type servers::postgres::copy_in::codec::ParsedRow">Parsed<wbr>Row</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>A parsed, insertable row: one gRPC value per targeted column, in COPY
+field order. Every parser emits these directly, whatever mechanism it
+used to produce them.</dd></dl></section></div></main></body></html>
