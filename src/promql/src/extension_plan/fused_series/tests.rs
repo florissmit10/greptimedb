@@ -2528,6 +2528,8 @@ fn direct_frame_stream(
         frame_builder: Some(builder),
         eval_schema: Some(schema),
         frame_cursor: None,
+        producer: None,
+        next_frame_ordinal: 0,
         _export_budget: Arc::new(Mutex::new(None)),
         ready: VecDeque::new(),
         done: false,
@@ -2554,6 +2556,41 @@ fn sparse_eval_chunk(rows: usize, value: f64) -> (Arc<SeriesSchema>, EvaluatedCh
     )
     .unwrap();
     (schema, chunk)
+}
+
+/// Provenance ordinals follow emitted frame rows across physical batches, not input chunks.
+#[tokio::test]
+async fn provenance_ordinals_continue_across_frame_flushes() {
+    const ROWS: usize = 800;
+    let (schema, chunk) = sparse_eval_chunk(ROWS, 3.0);
+    let mut stream = direct_frame_stream(Arc::clone(&schema), None);
+    stream.producer = Some(17);
+    stream.output_schema = super::provenance_frame_output_schema(schema.as_ref()).unwrap();
+    stream.convert(chunk).unwrap();
+    let batches = stream.map(|batch| batch.unwrap()).collect::<Vec<_>>().await;
+    assert!(
+        batches.len() > 1,
+        "fixture must cross the frame builder flush boundary"
+    );
+    let mut next = 0_u64;
+    for batch in batches {
+        let producer = batch
+            .column(batch.num_columns() - 2)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::UInt64Array>()
+            .unwrap();
+        let ordinal = batch
+            .column(batch.num_columns() - 1)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::UInt64Array>()
+            .unwrap();
+        for row in 0..batch.num_rows() {
+            assert_eq!(17, producer.value(row));
+            assert_eq!(next, ordinal.value(row));
+            next += 1;
+        }
+    }
+    assert_eq!(ROWS as u64, next);
 }
 
 /// A large evaluated chunk is encoded over successive polls rather than queued as all of its
@@ -4201,6 +4238,53 @@ fn the_logical_schema_follows_the_output_format() {
             .expect("the frame declares its ordering"),
         "computed values promise per-chain contiguity and nothing stronger"
     );
+}
+
+#[test]
+fn provenance_frame_format_is_distinct_and_survives_rebuild() {
+    let rows = fused(rate_tree());
+    let plain_schema = rows.schema().clone();
+    let plain_frame = FusedSeries::try_new_with_format(
+        Arc::from(PROMQL),
+        rows.tree().clone(),
+        rows.binding().clone(),
+        rows.inputs().into_iter().cloned().collect(),
+        Arc::clone(rows.schema()),
+        FusedOutputFormat::SeriesFrame,
+    )
+    .unwrap();
+    let provenance = FusedSeries::try_new_with_format(
+        Arc::from(PROMQL),
+        rows.tree().clone(),
+        rows.binding().clone(),
+        rows.inputs().into_iter().cloned().collect(),
+        Arc::clone(rows.schema()),
+        FusedOutputFormat::SeriesFrameWithProvenance,
+    )
+    .unwrap();
+    assert_eq!(plain_schema, rows.schema().clone());
+    assert_ne!(plain_frame.schema(), provenance.schema());
+    let schema = provenance.schema().inner();
+    assert_eq!(
+        &DataType::UInt64,
+        schema.field(schema.fields().len() - 2).data_type()
+    );
+    assert_eq!(
+        &DataType::UInt64,
+        schema.field(schema.fields().len() - 1).data_type()
+    );
+    let rebuilt = provenance
+        .with_exprs_and_inputs(
+            Vec::new(),
+            provenance
+                .inputs()
+                .iter()
+                .map(|input| (*input).clone())
+                .collect(),
+        )
+        .unwrap();
+    assert!(rebuilt.has_frame_provenance());
+    assert_eq!(provenance.schema(), rebuilt.schema());
 }
 
 /// Rebuilding a frame node keeps the format it was built with.

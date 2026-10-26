@@ -27,6 +27,7 @@ mod series_divide;
 #[cfg(test)]
 mod test_util;
 mod union_distinct_on;
+mod vector_select;
 
 pub use absent::{Absent, AbsentExec, AbsentStream};
 pub use aggregate_finalize::AggregateFinalize;
@@ -54,6 +55,7 @@ pub use range_manipulate::{RangeManipulate, RangeManipulateExec, RangeManipulate
 pub use scalar_calculate::ScalarCalculate;
 pub use series_divide::{SeriesDivide, SeriesDivideExec, SeriesDivideStream};
 pub use union_distinct_on::{UnionDistinctOn, UnionDistinctOnExec, UnionDistinctOnStream};
+pub use vector_select::{VectorSelect, VectorSelectExec};
 
 pub type Millisecond = <TimestampMillisecondType as ArrowPrimitiveType>::Native;
 
